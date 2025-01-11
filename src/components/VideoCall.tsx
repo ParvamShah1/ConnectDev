@@ -66,6 +66,9 @@ const VideoCall = () => {
 
   useEffect(() => {
     let mounted = true;
+    let retryCount = 0;
+    const maxRetries = 3;
+
     const initializeCall = async () => {
       if (!callId || !user) return;
 
@@ -90,7 +93,29 @@ const VideoCall = () => {
           throw new Error('Agora App ID not found');
         }
 
-        const agoraClient = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+        const agoraClient = AgoraRTC.createClient({ 
+          mode: 'rtc', 
+          codec: 'vp8',
+          retry: {
+            maxRetryCount: 3,
+            maxRetryDuration: 1000,
+            timeout: 15000
+          }
+        });
+
+        agoraClient.on('connection-state-change', (curState, prevState, reason) => {
+          console.log('Connection state changed:', prevState, '=>', curState, 'reason:', reason);
+          if (curState === 'DISCONNECTED' && reason !== 'LEAVE') {
+            if (retryCount < maxRetries) {
+              retryCount++;
+              console.log(`Attempting reconnection (${retryCount}/${maxRetries})...`);
+              setTimeout(() => {
+                if (mounted) initializeCall();
+              }, 2000 * retryCount);
+            }
+          }
+        });
+
         if (mounted) {
           setClient(agoraClient);
         }
@@ -99,16 +124,34 @@ const VideoCall = () => {
         setLocalAgoraUid(agoraUid);
 
         await agoraClient.join(appId, callId, null, agoraUid);
+        console.log('Successfully joined channel');
 
-        const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
-        await agoraClient.publish([audioTrack, videoTrack]);
-
+        const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks(
+          {
+            encoderConfig: {
+              width: 640,
+              height: 360,
+              frameRate: 30,
+              bitrateMin: 400,
+              bitrateMax: 800,
+            }
+          },
+          {
+            AEC: true,
+            AGC: true,
+            ANS: true
+          }
+        );
+        
         if (mounted) {
           setLocalTracks([audioTrack, videoTrack]);
           if (localVideoRef.current) {
             videoTrack.play(localVideoRef.current);
           }
         }
+
+        await agoraClient.publish([audioTrack, videoTrack]);
+        console.log('Successfully published local tracks');
 
         await updateDoc(doc(db, 'calls', callId), {
           status: 'active',
@@ -120,42 +163,57 @@ const VideoCall = () => {
         });
 
         agoraClient.on('user-published', async (user, mediaType) => {
-          console.log('User published:', user.uid, mediaType);
-
-          // Only subscribe if it's not our own stream
-          if (user.uid !== localAgoraUid) {
+          console.log('Remote user published:', user.uid, mediaType);
+          try {
             await agoraClient.subscribe(user, mediaType);
+            console.log('Successfully subscribed to remote user:', user.uid);
 
             if (mediaType === 'video') {
               setRemoteUser(user);
               if (remoteVideoRef.current && user.videoTrack) {
-                user.videoTrack.play(remoteVideoRef.current);
+                await user.videoTrack.play(remoteVideoRef.current);
+                console.log('Remote video track playing');
               }
             }
 
             if (mediaType === 'audio' && user.audioTrack) {
-              user.audioTrack.play();
+              await user.audioTrack.play();
+              console.log('Remote audio track playing');
             }
+          } catch (error) {
+            console.error('Error subscribing to remote user:', error);
+            // Attempt to recover from subscription error
+            setTimeout(async () => {
+              try {
+                await agoraClient.subscribe(user, mediaType);
+                console.log('Successfully resubscribed to remote user:', user.uid);
+              } catch (retryError) {
+                console.error('Retry subscription failed:', retryError);
+              }
+            }, 2000);
           }
         });
 
-        agoraClient.on('user-unpublished', (user, mediaType) => {
-          console.log('User unpublished:', user.uid, mediaType);
-          if (mediaType === 'video' && remoteUser?.uid === user.uid) {
-            if (user.videoTrack) {
-              user.videoTrack.stop();
+        agoraClient.on('user-unpublished', async (user, mediaType) => {
+          console.log('Remote user unpublished:', user.uid, mediaType);
+          try {
+            await agoraClient.unsubscribe(user, mediaType);
+            
+            if (mediaType === 'video') {
+              setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
             }
-            setRemoteUser(null);
+          } catch (error) {
+            console.error('Error unsubscribing from remote user:', error);
           }
         });
 
-        agoraClient.on('user-left', (user) => {
-          console.log('User left:', user.uid);
-          if (mounted && remoteUser?.uid === user.uid) {
-            if (remoteUser.videoTrack) {
-              remoteUser.videoTrack.stop();
-            }
-            setRemoteUser(null);
+        agoraClient.on('user-left', async (user) => {
+          console.log('Remote user left:', user.uid);
+          try {
+            await agoraClient.unsubscribe(user);
+            setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
+          } catch (error) {
+            console.error('Error handling user left:', error);
           }
         });
 
@@ -215,10 +273,10 @@ const VideoCall = () => {
     <div className="min-h-screen bg-gray-900 p-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Local video */}
-        <div className="relative bg-black rounded-lg overflow-hidden">
+        <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
           <div 
             ref={localVideoRef}
-            className="w-full h-[400px]"
+            className="w-full h-full"
           />
           <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
             You ({userRole === 'client' ? 'Client' : 'Developer'})
@@ -226,10 +284,10 @@ const VideoCall = () => {
         </div>
 
         {/* Remote video */}
-        <div className="relative bg-black rounded-lg overflow-hidden">
+        <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
           <div 
             ref={remoteVideoRef}
-            className="w-full h-[400px]"
+            className="w-full h-full"
           />
           {remoteUser ? (
             <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
@@ -237,7 +295,10 @@ const VideoCall = () => {
             </div>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-white">
-              Waiting for {getOtherParticipantRole()} to join...
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2"></div>
+                <p>Waiting for {getOtherParticipantRole()} to join...</p>
+              </div>
             </div>
           )}
         </div>
