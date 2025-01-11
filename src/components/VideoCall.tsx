@@ -101,14 +101,15 @@ const VideoCall = () => {
         await agoraClient.join(appId, callId, null, agoraUid);
 
         const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
-        await agoraClient.publish([audioTrack, videoTrack]);
-
+        
         if (mounted) {
           setLocalTracks([audioTrack, videoTrack]);
           if (localVideoRef.current) {
             videoTrack.play(localVideoRef.current);
           }
         }
+
+        await agoraClient.publish([audioTrack, videoTrack]);
 
         await updateDoc(doc(db, 'calls', callId), {
           status: 'active',
@@ -121,42 +122,33 @@ const VideoCall = () => {
 
         agoraClient.on('user-published', async (user, mediaType) => {
           console.log('User published:', user.uid, mediaType);
+          await agoraClient.subscribe(user, mediaType);
 
-          // Only subscribe if it's not our own stream
-          if (user.uid !== localAgoraUid) {
-            await agoraClient.subscribe(user, mediaType);
-
-            if (mediaType === 'video') {
-              setRemoteUser(user);
-              if (remoteVideoRef.current && user.videoTrack) {
-                user.videoTrack.play(remoteVideoRef.current);
-              }
+          if (mediaType === 'video') {
+            setRemoteUser(user);
+            if (remoteVideoRef.current && user.videoTrack) {
+              user.videoTrack.play(remoteVideoRef.current);
             }
+          }
 
-            if (mediaType === 'audio' && user.audioTrack) {
-              user.audioTrack.play();
-            }
+          if (mediaType === 'audio' && user.audioTrack) {
+            user.audioTrack.play();
           }
         });
 
         agoraClient.on('user-unpublished', (user, mediaType) => {
           console.log('User unpublished:', user.uid, mediaType);
-          if (mediaType === 'video' && remoteUser?.uid === user.uid) {
-            if (user.videoTrack) {
-              user.videoTrack.stop();
-            }
-            setRemoteUser(null);
+          agoraClient.unsubscribe(user, mediaType);
+          
+          if (mediaType === 'video') {
+            setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
           }
         });
 
-        agoraClient.on('user-left', (user) => {
+        agoraClient.on('user-left', async (user) => {
           console.log('User left:', user.uid);
-          if (mounted && remoteUser?.uid === user.uid) {
-            if (remoteUser.videoTrack) {
-              remoteUser.videoTrack.stop();
-            }
-            setRemoteUser(null);
-          }
+          await agoraClient.unsubscribe(user);
+          setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
         });
 
       } catch (err) {
@@ -215,10 +207,10 @@ const VideoCall = () => {
     <div className="min-h-screen bg-gray-900 p-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Local video */}
-        <div className="relative bg-black rounded-lg overflow-hidden">
+        <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
           <div 
             ref={localVideoRef}
-            className="w-full h-[400px]"
+            className="w-full h-full"
           />
           <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
             You ({userRole === 'client' ? 'Client' : 'Developer'})
@@ -226,10 +218,10 @@ const VideoCall = () => {
         </div>
 
         {/* Remote video */}
-        <div className="relative bg-black rounded-lg overflow-hidden">
+        <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
           <div 
             ref={remoteVideoRef}
-            className="w-full h-[400px]"
+            className="w-full h-full"
           />
           {remoteUser ? (
             <div className="absolute bottom-4 left-4 bg-black bg-opacity-50 text-white px-2 py-1 rounded">
@@ -237,7 +229,10 @@ const VideoCall = () => {
             </div>
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-white">
-              Waiting for {getOtherParticipantRole()} to join...
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2"></div>
+                <p>Waiting for {getOtherParticipantRole()} to join...</p>
+              </div>
             </div>
           )}
         </div>
