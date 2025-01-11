@@ -66,6 +66,9 @@ const VideoCall = () => {
 
   useEffect(() => {
     let mounted = true;
+    let retryCount = 0;
+    const maxRetries = 3;
+
     const initializeCall = async () => {
       if (!callId || !user) return;
 
@@ -90,7 +93,29 @@ const VideoCall = () => {
           throw new Error('Agora App ID not found');
         }
 
-        const agoraClient = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+        const agoraClient = AgoraRTC.createClient({ 
+          mode: 'rtc', 
+          codec: 'vp8',
+          retry: {
+            maxRetryCount: 3,
+            maxRetryDuration: 1000,
+            timeout: 15000
+          }
+        });
+
+        agoraClient.on('connection-state-change', (curState, prevState, reason) => {
+          console.log('Connection state changed:', prevState, '=>', curState, 'reason:', reason);
+          if (curState === 'DISCONNECTED' && reason !== 'LEAVE') {
+            if (retryCount < maxRetries) {
+              retryCount++;
+              console.log(`Attempting reconnection (${retryCount}/${maxRetries})...`);
+              setTimeout(() => {
+                if (mounted) initializeCall();
+              }, 2000 * retryCount);
+            }
+          }
+        });
+
         if (mounted) {
           setClient(agoraClient);
         }
@@ -99,8 +124,24 @@ const VideoCall = () => {
         setLocalAgoraUid(agoraUid);
 
         await agoraClient.join(appId, callId, null, agoraUid);
+        console.log('Successfully joined channel');
 
-        const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks();
+        const [audioTrack, videoTrack] = await AgoraRTC.createMicrophoneAndCameraTracks(
+          {
+            encoderConfig: {
+              width: 640,
+              height: 360,
+              frameRate: 30,
+              bitrateMin: 400,
+              bitrateMax: 800,
+            }
+          },
+          {
+            AEC: true,
+            AGC: true,
+            ANS: true
+          }
+        );
         
         if (mounted) {
           setLocalTracks([audioTrack, videoTrack]);
@@ -110,6 +151,7 @@ const VideoCall = () => {
         }
 
         await agoraClient.publish([audioTrack, videoTrack]);
+        console.log('Successfully published local tracks');
 
         await updateDoc(doc(db, 'calls', callId), {
           status: 'active',
@@ -121,34 +163,58 @@ const VideoCall = () => {
         });
 
         agoraClient.on('user-published', async (user, mediaType) => {
-          console.log('User published:', user.uid, mediaType);
-          await agoraClient.subscribe(user, mediaType);
+          console.log('Remote user published:', user.uid, mediaType);
+          try {
+            await agoraClient.subscribe(user, mediaType);
+            console.log('Successfully subscribed to remote user:', user.uid);
 
-          if (mediaType === 'video') {
-            setRemoteUser(user);
-            if (remoteVideoRef.current && user.videoTrack) {
-              user.videoTrack.play(remoteVideoRef.current);
+            if (mediaType === 'video') {
+              setRemoteUser(user);
+              if (remoteVideoRef.current && user.videoTrack) {
+                await user.videoTrack.play(remoteVideoRef.current);
+                console.log('Remote video track playing');
+              }
             }
-          }
 
-          if (mediaType === 'audio' && user.audioTrack) {
-            user.audioTrack.play();
+            if (mediaType === 'audio' && user.audioTrack) {
+              await user.audioTrack.play();
+              console.log('Remote audio track playing');
+            }
+          } catch (error) {
+            console.error('Error subscribing to remote user:', error);
+            // Attempt to recover from subscription error
+            setTimeout(async () => {
+              try {
+                await agoraClient.subscribe(user, mediaType);
+                console.log('Successfully resubscribed to remote user:', user.uid);
+              } catch (retryError) {
+                console.error('Retry subscription failed:', retryError);
+              }
+            }, 2000);
           }
         });
 
-        agoraClient.on('user-unpublished', (user, mediaType) => {
-          console.log('User unpublished:', user.uid, mediaType);
-          agoraClient.unsubscribe(user, mediaType);
-          
-          if (mediaType === 'video') {
-            setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
+        agoraClient.on('user-unpublished', async (user, mediaType) => {
+          console.log('Remote user unpublished:', user.uid, mediaType);
+          try {
+            await agoraClient.unsubscribe(user, mediaType);
+            
+            if (mediaType === 'video') {
+              setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
+            }
+          } catch (error) {
+            console.error('Error unsubscribing from remote user:', error);
           }
         });
 
         agoraClient.on('user-left', async (user) => {
-          console.log('User left:', user.uid);
-          await agoraClient.unsubscribe(user);
-          setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
+          console.log('Remote user left:', user.uid);
+          try {
+            await agoraClient.unsubscribe(user);
+            setRemoteUser(prev => prev?.uid === user.uid ? null : prev);
+          } catch (error) {
+            console.error('Error handling user left:', error);
+          }
         });
 
       } catch (err) {
