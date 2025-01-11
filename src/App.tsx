@@ -8,7 +8,7 @@ import DeveloperDashboard from './pages/DeveloperDashboard';
 import ClientDashboard from './pages/ClientDashboard';
 import ProfilePage from './pages/ProfilePage';
 import VideoCall from './components/VideoCall';
-import Navbar from './components/Navbar';
+// import Navbar from './components/Navbar';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from './lib/firebase';
 
@@ -61,26 +61,26 @@ const AuthRedirect: React.FC<{ children: React.ReactNode }> = ({ children }) => 
   return <>{children}</>;
 };
 
-// Layout component to wrap all pages
-const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user } = useAuth();
-  const location = window.location.pathname;
-  const showNavbar = user || location === '/signin' || location === '/signup';
 
-  return (
-    <div className="min-h-screen bg-gray-50">
-      {showNavbar && <Navbar />}
-      <main className="pt-4">{children}</main>
-    </div>
-  );
-};
+// // const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+// //   const { user } = useAuth();
+// //   const location = window.location.pathname;
+// //   const showNavbar = user || location === '/signin' || location === '/signup';
+
+//   return (
+//     <div className="min-h-screen bg-gray-50">
+//       {showNavbar && <Navbar />}
+//       <main className="pt-4">{children}</main>
+//     </div>
+//   );
+// };
 
 function App() {
   return (
     <Router>
       <AuthProvider>
         <AuthRedirect>
-          <Layout>
+          {/* <Layout> */}
             <Routes>
               <Route path="/" element={<LandingPage />} />
               <Route path="/signin" element={<SignIn />} />
@@ -118,7 +118,7 @@ function App() {
                 }
               />
             </Routes>
-          </Layout>
+          {/* </Layout> */}
         </AuthRedirect>
       </AuthProvider>
     </Router>
